@@ -1,7 +1,8 @@
 name: Build post index
 on:
+  workflow_dispatch:
   push:
-    paths: ['posts/*.md']
+    paths: ['posts/*.md', 'scripts/**']
 permissions:
   contents: write
 jobs:
@@ -9,9 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: pip install markdown
       - run: python3 scripts/build-index.py
       - run: |
           git config user.name "github-actions"
           git config user.email "actions@users.noreply.github.com"
-          git add posts/posts.json
-          git diff --staged --quiet || (git commit -m "Update post index" && git push)
+          git add posts/posts.json blog sitemap.xml
+          git diff --staged --quiet || (git commit -m "Update post index and pages" && git push)

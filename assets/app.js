@@ -7,7 +7,7 @@ async function renderPosts(el){
   const limit=+el.dataset.limit||99;
   if(!posts||!posts.length){el.innerHTML='<div class="empty">No posts yet. Add one in <code>posts/</code> and list it in <code>posts/posts.json</code>.</div>';return}
   el.innerHTML=posts.sort((a,b)=>b.date.localeCompare(a.date)).slice(0,limit).map(p=>
-   `<a class="item" href="post.html?p=${encodeURIComponent(p.slug)}"><small>${fmt(p.date)}</small><h3>${esc(p.title)}</h3><p>${esc(p.summary||'')}</p><div style="margin-top:8px">${(p.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div></a>`).join('');
+   `<a class="item" href="blog/${encodeURIComponent(p.slug)}/"><small>${fmt(p.date)}</small><h3>${esc(p.title)}</h3><p>${esc(p.summary||'')}</p><div style="margin-top:8px">${(p.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div></a>`).join('');
 }
 async function renderDocs(el){
   const docs=await getJSON('docs/docs.json');
