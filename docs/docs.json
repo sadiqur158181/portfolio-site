@@ -1,1 +1,4 @@
-[]
+[
+  {"title":"Oracle RAC 19c on VMware ESXi 6.7: Complete Build and Administration Guide","file":"oracle-rac-19c-esxi-guide.pdf","desc":"2-node cluster build: ESXi shared disks, udev, Grid Infrastructure, DBCA, srvctl/crsctl reference. 20 pages.","date":"2026-07-01"},
+  {"title":"Applying an Oracle APEX Patch: APEX 26.1","file":"apex-26-1-patch-guide.pdf","desc":"PSE bundle procedure for a multi-PDB environment, including ORDS static path update. 1 page."}
+]
