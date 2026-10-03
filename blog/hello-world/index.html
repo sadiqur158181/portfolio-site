@@ -8,10 +8,1231 @@
 <body><header class="top"><div class="wrap"><a class="brand" href="/index.html">Sadiqur Rahman</a><nav><a href="/index.html#experience">Experience</a><a href="/blog.html">Blog</a><a href="/index.html#library">Library</a><a href="/index.html#contact">Contact</a></nav></div></header><article class="post"><small>2026-10-03</small><h1>What I will write about here</h1><div><span class="tag">meta</span></div><p>This blog collects working notes from running Oracle environments in production.</p>
 <h2>Topics</h2>
 <ul>
-<li>Oracle EBS R12.2: adop online patching, Rapid Clone, 12.2.9 to 12.2.15 upgrade</li>
-<li>Oracle Database: AutoUpgrade from 19c to 26ai, RMAN recovery, Data Guard</li>
-<li>RAC 19c on OCI and VMware ESXi</li>
-<li>APEX and ORDS behind nginx</li>
+<li>FLUTTER WEB APP - PRODUCTION MIGRATION RUNBOOK</li>
+<li>SECTION 0 - ARCHITECTURE
+================================================================================
+
+    Browser (HTTPS)
+         |
+         v
+    sg-proxy-server        nginx 1.27.0, TLS termination
+    Public IP:  168.138.161.207
+    Private IP: 172.16.1.35/24 (VCN A)
+         |
+         |  proxy_pass  http://161.118.255.47:8081   (plain HTTP)
+         v
+    sgapex26               Apache 2.4.62 (Oracle Linux)
+    Public IP:  161.118.255.47
+    Private IP: 10.5.0.204/24 (VCN B)
+    DocumentRoot: /var/www/sams-prod
+
+    UNCHANGED DEPENDENCIES (do not migrate, do not cancel):
+      - API backend:  https://mis.saadgroupbd.com/ords/sg_mis/sams/v1/
+      - File uploads: https://softomaticbd.com/file_uploader/
+      - Mail (MX + SPF): Namecheap shared hosting
+      - DNS zone: served by dns1.namecheaphosting.com (cPanel Zone Editor)
+
+    NOTE: The two OCI instances are in SEPARATE VCNs with no peering, so the
+    proxy reaches the backend over its PUBLIC IP. Traffic leaves and re-enters
+    OCI. Acceptable because only static files cross it and the port is firewalled
+    to the proxy only. A Local Peering Gateway is the proper long-term fix.
+
+
+================================================================================
+SECTION 1 - SERVER PREPARATION (one-time, per host)
+================================================================================
+This is the groundwork done on the RND/test host (flutterrnd, 138.2.106.229)
+and repeated on sgapex26. Oracle Linux 9 on OCI. Everything here is RHEL-family
+specific and differs from Debian/Ubuntu in ways that cause real failures.
+
+    RHEL-family vs Debian - know the difference up front:
+      - package/service is "httpd", NOT "apache2"
+      - no a2enmod, no sites-available; most modules are built in
+      - config lives in /etc/httpd/conf.d/
+      - SELinux is ENFORCING and will block Apache even when file
+        permissions look perfectly correct
+      - firewalld may not be running; OCI Security Lists / NSGs do the work
+
+
+1.1  SSH ACCESS
+-----------------------------------------------------------
+     Symptom encountered: root SSH password login denied.
+
+     ROOT CAUSE: PermitRootLogin was commented out in /etc/ssh/sshd_config,
+     so it defaulted to "prohibit-password" (key-only). PasswordAuthentication
+     was already "yes" in both the main config and the cloud-init drop-in, but
+     that alone is NOT enough.
+
+         sudo vim /etc/ssh/sshd_config
+         #   #PermitRootLogin prohibit-password
+         # ->
+         #   PermitRootLogin yes
+
+         sudo systemctl restart sshd
+         sudo sshd -T | grep -iE 'permitrootlogin|passwordauthentication'
+         # both should return "yes"
+
+     >>> REVERT THIS FOR PRODUCTION. <<< Go back to
+     PermitRootLogin prohibit-password with SSH keys once setup is finished.
+     Still outstanding - see 10.4.
+
+
+1.2  INSTALL APACHE
+-----------------------------------------------------------
+         sudo dnf install httpd -y
+         sudo systemctl enable --now httpd
+         httpd -M | grep -E 'rewrite|deflate|expires|headers'
+
+     All four modules are needed: rewrite for SPA routing, deflate for gzip,
+     expires and headers for cache control. Confirm before writing the vhost.
+
+
+1.3  SELINUX TOOLS AND FILE CONTEXT
+-----------------------------------------------------------
+     REQUIRED on RHEL-family. Apache cannot read the files without it even
+     when chown/chmod look right, and the failure mode is a confusing 403.
+
+         sudo dnf install policycoreutils-python-utils -y
+         sudo semanage fcontext -a -t httpd_sys_content_t "/var/www/<app>(/.*)?"
+         sudo restorecon -Rv /var/www/<app>
+
+         ls -Z /var/www/<app>/index.html    # must show httpd_sys_content_t
+
+     For a non-standard port, SELinux must also be told:
+         sudo semanage port -l | grep http_port_t
+         sudo semanage port -a -t http_port_t -p tcp 8081
+         # use -m instead of -a if that port type already exists
+
+
+1.4  FILE PLACEMENT AND OWNERSHIP
+-----------------------------------------------------------
+     On the dev machine:
+         flutter build web --release
+         # zip build/web/* and upload
+
+     On the server:
+         unzip -oq <build>.zip
+         sudo mkdir -p /var/www/<app>
+         sudo cp -r <extracted>/* /var/www/<app>/
+         sudo chown -R apache:apache /var/www/<app>
+         sudo chmod -R 755 /var/www/<app>
+
+     Then apply the SELinux context from 1.3.
+
+
+1.5  APACHE VIRTUALHOST - AND THE TWO REWRITE GOTCHAS
+-----------------------------------------------------------
+     >>> GOTCHA #1: "RewriteBase /" is INVALID directly inside <VirtualHost>
+     on Apache 2.4.62. Do not put it there. It belongs only in a <Directory>
+     or .htaccess context, and a root-level app does not need it at all. <<<
+
+     >>> GOTCHA #2 (the big one): plain %{REQUEST_FILENAME} in a RewriteCond
+     inside server/vhost context does NOT resolve to the real disk path. It
+     stays as the bare URI (e.g. "/manifest.json"), so "-f" is always false and
+     EVERY request gets rewritten to index.html, including requests for files
+     that genuinely exist. The browser then throws
+         SyntaxError: Unexpected token '<'
+     because JS and JSON requests are receiving HTML. <<<
+
+     FIX - always build the path explicitly:
+         RewriteCond %{DOCUMENT_ROOT}%{REQUEST_URI} !-f
+         RewriteCond %{DOCUMENT_ROOT}%{REQUEST_URI} !-d
+         RewriteRule ^ index.html [L]
+
+     The full production vhost, including the cache-header corrections made
+     later, is in 3.3. Apply and reload with:
+         sudo apachectl configtest
+         sudo systemctl reload httpd
+
+
+1.6  FIREWALL
+-----------------------------------------------------------
+         sudo systemctl status firewalld
+
+     If FirewallD is not running:
+         sudo iptables -L -n | grep -i 80
+
+     Empty output means no OS-level firewall is blocking and you are relying
+     entirely on the OCI Security List / NSG. Confirm the needed ports are
+     open there. For this build that means port 8081 restricted to the proxy
+     only - see 4.2.
+
+
+1.7  VERIFY THE BASELINE
+-----------------------------------------------------------
+         curl -I http://<server-ip>/
+         curl -I http://<server-ip>/manifest.json
+
+     manifest.json MUST return its own content-type and length, not
+     index.html's. This is the check that proves gotcha #2 is fixed.
+
+     Then open http://<server-ip>/ in a browser: splash clears, app renders,
+     routing works (e.g. /login).
+
+
+1.8  DEBUGGING TOOLKIT (keep for future rewrite/asset problems)
+-----------------------------------------------------------
+     Which vhosts are bound to which ports:
+         sudo httpd -S
+
+     Competing rewrite rules elsewhere:
+         grep -rl "RewriteEngine\|RewriteRule" /etc/httpd/conf.d/ /etc/httpd/conf/httpd.conf
+
+     A stray .htaccess overriding vhost rules:
+         ls -la /var/www/<app>/.htaccess
+
+     Live rewrite trace (very noisy - remove afterwards). Add inside
+     <VirtualHost>:
+         LogLevel alert rewrite:trace5
+     then:
+         sudo systemctl reload httpd
+         curl http://<ip>/manifest.json -o /dev/null
+         sudo tail -60 /var/log/httpd/<vhost>-error.log
+
+     SELinux denials:
+         sudo ausearch -m avc -ts recent
+         sudo dmesg | grep -i denied
+
+
+1.9  NGINX SIDE - PRE-EXISTING GOTCHAS WORTH RE-READING
+-----------------------------------------------------------
+     >>> GOTCHA #3: Check server_name for a typo or an extra suffix (e.g. a
+     file saved as "domain.com.conf" but with server_name "domain.com.conf").
+     Nginx does NOT error on this. It silently falls through to a different,
+     often wrong, default vhost. It presents as "random redirect to another
+     app" and is genuinely confusing to debug. <<<
+
+     >>> GOTCHA #4: Round-robin / duplicate A records. A hostname can carry
+     TWO A records pointing at old and new hosts, so requests randomly hit
+     either server. This looks exactly like "SSL or config randomly failing"
+     but is purely DNS. Check EVERY row for that exact hostname in the zone
+     panel - they can be non-adjacent or on another page - and delete the
+     stale one. <<<
+
+     DNS sanity check BEFORE wiring Nginx:
+         dig +short <domain>
+         curl -4 ifconfig.me        # run ON the proxy server
+
+
+================================================================================
+SECTION 2 - PRE-FLIGHT (do these FIRST; they have waiting time)
+================================================================================
+
+2.1  LOWER DNS TTL  [THE SINGLE BIGGEST DOWNTIME LEVER]
+-----------------------------------------------------------
+     Check current TTL:
+         dig +noall +answer yahyaagro.saadgroupbd.com
+
+     If TTL is 14400 (4 hours), change it to 300 in cPanel Zone Editor,
+     LEAVING THE IP UNCHANGED.
+
+     CRITICAL: Resolvers that cached the old answer keep it for up to the
+     OLD TTL. Lowering to 300 only affects resolvers that fetch AFTER the
+     change. So wait one full old-TTL cycle (4 hours) before cutting over,
+     or some users stay on the old host for hours with no way to force them off.
+
+     Do this before anything else so the clock runs while you work.
+
+
+2.2  GENERATE CSR AND PRIVATE KEY
+-----------------------------------------------------------
+     On sg-proxy-server:
+
+         cd /etc/nginx/ssl
+         mkdir -p yahyaagro.saadgroupbd.com
+         cd yahyaagro.saadgroupbd.com
+
+         openssl req -new -newkey rsa:2048 -nodes \
+           -keyout yahyaagro_saadgroupbd_com.key \
+           -out yahyaagro_saadgroupbd_com.csr \
+           -subj "/CN=yahyaagro.saadgroupbd.com/O=Softomatic/C=BD"
+
+         chmod 700 /etc/nginx/ssl/yahyaagro.saadgroupbd.com
+         chmod 600 yahyaagro_saadgroupbd_com.key
+
+         cat yahyaagro_saadgroupbd_com.csr
+
+     WHY A NEW CSR: The existing cert was "Namecheap SSL (Shared hosting tool)"
+     type. That means cPanel holds the private key and you CANNOT download it,
+     so the existing cert cannot be installed on your own server. A reissue
+     with your own CSR is the only path.
+
+     >>> BACK UP THE .key FILE OFF THE SERVER IMMEDIATELY. <<<
+     If lost after issuance, the cert is dead weight and you start over.
+
+
+2.3  SUBMIT THE REISSUE
+-----------------------------------------------------------
+     Namecheap -> SSL Certificates -> the cert -> Reissue.
+     Paste the CSR. Choose DNS (CNAME) validation.
+
+     KEY FACTS LEARNED:
+     - A reissue does NOT auto-revoke the old cert (unless you changed the
+       domain name). The old cert stays valid on the shared host, which
+       PRESERVES YOUR ROLLBACK PATH. Do not click "Revoke" on the old entry.
+     - A reissue carries the REMAINING validity period, not a fresh year.
+       Our cert came back valid only to 7 Apr 2027 (~6.5 months).
+     - PositiveSSL on a third-level name DID include the www SAN. Verify
+       rather than assume either way.
+
+
+2.4  ADD THE DCV CNAME  [THIS IS WHERE WE LOST HOURS]
+-----------------------------------------------------------
+     On the cert's Details page, click the small dropdown arrow (v) beside
+     EDIT METHODS -> "Get Record". It shows:
+
+         Host:   _<32-HEX-HASH>.yahyaagro.saadgroupbd.com
+         Target: <hash>.<hash>.<hash>.comodoca.com
+
+     >>> THE HASH IS DERIVED FROM THE CSR. A NEW CSR MEANS A NEW CNAME. <<<
+     An older DCV record from a previous issuance does NOT satisfy the new
+     order, even though the panel may show a green "DNS Record Published" tick
+     for it. That tick misled us; the order sat PENDING for hours.
+
+     WHERE TO ADD IT: Check the SOA to find who serves your zone:
+         dig CNAME _<hash>.yahyaagro.saadgroupbd.com
+
+     Ours returned NXDOMAIN with:
+         SOA dns1.namecheaphosting.com. cpanel.tech.namecheap.com.
+
+     That means Namecheap HOSTING DNS, so the record goes in
+     cPANEL -> ZONE EDITOR, *not* the Namecheap domain panel's Advanced DNS tab.
+
+     Add: Type CNAME / Name = full host / Record = full target / TTL 300
+     COPY-PASTE both strings. Retyping 32 hex chars is how this fails silently.
+
+     VERIFY FROM THREE ANGLES before waiting on the CA:
+         dig CNAME _<hash>.yahyaagro.saadgroupbd.com +short
+         dig 8.8.8.8 CNAME _<hash>.yahyaagro.saadgroupbd.com +short
+         dig dns1.namecheaphosting.com CNAME _<hash>.yahyaagro.saadgroupbd.com +short
+
+     All three must return the comodoca.com target. The 8.8.8.8 one is
+     roughly what Sectigo sees. Then wait 15-30 min. There is no button.
+
+     READING dig OUTPUT:
+       NXDOMAIN + SOA in AUTHORITY  = zone answered, record genuinely absent
+       ANSWER: 1 + CNAME row        = record is live
+       Empty +short                 = same as NXDOMAIN, but less informative
+
+
+================================================================================
+SECTION 3 - STAGE THE APP ON sgapex26 (zero risk, nothing live)
+================================================================================
+
+3.1  DEPLOY THE BUILD
+-----------------------------------------------------------
+         sudo /usr/local/bin/deploy-sams.sh /u01/sams-deploy/34.zip
+
+     GOTCHA: The zip usually extracts into a nested folder (e.g. 34/) rather
+     than dropping index.html at the top. The deploy script handles this by
+     locating index.html with find and copying from its directory.
+
+     Verify the build number actually changed:
+         curl -s http://localhost:8081/version.json
+
+
+3.2  SELINUX AND PERMISSIONS (Oracle Linux)
+-----------------------------------------------------------
+         semanage port -a -t http_port_t -p tcp 8081
+         semanage fcontext -a -t httpd_sys_content_t "/var/www/sams-prod(/.*)?"
+         restorecon -Rv /var/www/sams-prod
+         chown -R apache:apache /var/www/sams-prod
+
+
+3.3  APACHE VHOST  /etc/httpd/conf.d/sams-prod.conf
+-----------------------------------------------------------
+     Listen 8081
+     <VirtualHost *:8081>
+         ServerName sgapex26
+         DocumentRoot /var/www/sams-prod
+
+         <Directory /var/www/sams-prod>
+             Options -Indexes +FollowSymLinks
+             AllowOverride All
+             Require all granted
+         </Directory>
+
+         RewriteEngine On
+         RewriteCond %{DOCUMENT_ROOT}%{REQUEST_URI} !-f
+         RewriteCond %{DOCUMENT_ROOT}%{REQUEST_URI} !-d
+         RewriteRule ^ index.html [L]
+
+         <FilesMatch "^(index\.html|flutter_service_worker\.js|main\.dart\.js|version\.json|manifest\.json|flutter_bootstrap\.js)$">
+             Header set Cache-Control "no-cache, no-store, must-revalidate"
+             Header set Pragma "no-cache"
+         </FilesMatch>
+
+         <IfModule mod_expires.c>
+             ExpiresActive On
+             ExpiresByType text/css   "access plus 30 days"
+             ExpiresByType image/png  "access plus 30 days"
+             ExpiresByType font/woff2 "access plus 30 days"
+         </IfModule>
+
+         ErrorLog  logs/sams-prod-error.log
+         CustomLog logs/sams-prod-access.log combined
+     </VirtualHost>
+
+     >>> CRITICAL CACHE GOTCHA <<<
+     The original config had:
+         ExpiresByType application/javascript "access plus 30 days"
+     Flutter's main.dart.js has NO content hash in its filename. That rule
+     would have made returning users keep the OLD BUILD for up to 30 days
+     after a successful deploy. It was REMOVED and replaced with the
+     FilesMatch no-cache block above.
+
+     Use the SPA rewrite form %{DOCUMENT_ROOT}%{REQUEST_URI} (not -f/-d on
+     bare REQUEST_URI), or manifest.json and other real files get swallowed
+     and returned as index.html.
+
+     Apply and verify:
+         apachectl configtest
+         systemctl reload httpd
+         httpd -M | grep headers          # mod_headers must be loaded
+         curl -sI http://localhost:8081/main.dart.js | grep -i cache-control
+         curl -sI http://localhost:8081/index.html  | grep -i cache-control
+         curl -sI http://localhost:8081/favicon.png | grep -i expires
+
+     EXPECTED: no-cache on the first two, a future Expires on the third.
+     That split is the whole point: entry points never cached, assets cached long.
+
+
+3.4  VERIFY THE REWRITE ISN'T OVER-MATCHING
+-----------------------------------------------------------
+         curl -sI http://localhost:8081/manifest.json | grep -iE 'content-type|content-length'
+
+     MUST return application/json with its own length (ours: 1043).
+     If it returns text/html at index.html's size (ours: 11943), the rewrite
+     is swallowing real files. This same 11943 signature is how we later
+     detected the missing animal-passport.html.
+
+
+3.5  FIND ORPHANED FILES THE BUILD DOESN'T CONTAIN
+-----------------------------------------------------------
+     Extract every URL baked into the bundle:
+         grep -ao 'https\?://[a-zA-Z0-9._/-]*' /var/www/sams-prod/main.dart.js | sort -u
+
+     THIS FOUND A REAL PROBLEM: a hardcoded absolute link to
+         https://yahyaagro.saadgroupbd.com/animal-passport.html
+     which was NOT in the Flutter build. It lived only on the shared host.
+
+     WHY IT WOULD HAVE BEEN HARD TO DIAGNOSE: The SPA rewrite would serve
+     index.html for that URL with HTTP 200. Not a 404. Users would see the app
+     reload itself or a blank screen, and nothing in the logs would look wrong.
+
+     Recover it BEFORE cutover, while DNS still points at the old host:
+         curl -sI https://yahyaagro.saadgroupbd.com/animal-passport.html
+         curl -s  https://yahyaagro.saadgroupbd.com/animal-passport.html \
+              -o /u01/sams-deploy/animal-passport.html
+         head -20 /u01/sams-deploy/animal-passport.html
+
+     If head shows the Flutter index.html, the file never existed and the
+     feature was already broken. Ours was real: 33723 bytes, a standalone
+     Bengali page pulling from .../sams/v1/public/passport/.
+
+     Install it:
+         cp /u01/sams-deploy/animal-passport.html /var/www/sams-prod/
+         chown apache:apache /var/www/sams-prod/animal-passport.html
+         restorecon -v /var/www/sams-prod/animal-passport.html
+         curl -sI http://localhost:8081/animal-passport.html | grep -i content-length
+         # must show 33723, NOT 11943
+
+     Also check its own dependencies:
+         grep -oE 'https?://[a-zA-Z0-9._/-]+' animal-passport.html | sort -u
+
+
+3.6  PROTECT STATIC FILES FROM THE DEPLOY SCRIPT
+-----------------------------------------------------------
+     deploy-sams.sh does `rm -rf /var/www/sams-prod/*`, so any hand-placed
+     file dies on the next release.
+
+         mkdir -p /u01/sams-static
+         cp /var/www/sams-prod/animal-passport.html /u01/sams-static/
+
+     Edit /usr/local/bin/deploy-sams.sh; after the main copy line and BEFORE
+     the chown/restorecon lines, add:
+
+         cp /u01/sams-static/* /var/www/sams-prod/ 2>/dev/null || true
+
+     The `|| true` stops `set -e` aborting the deploy if the dir is empty.
+
+     PROVE IT SURVIVES A FULL CYCLE:
+         /usr/local/bin/deploy-sams.sh /u01/sams-deploy/34.zip
+         curl -sI http://localhost:8081/animal-passport.html | grep -i content-length
+
+     PROPER FIX: have the developer include this file in the Flutter build
+     output, then retire /u01/sams-static entirely.
+
+
+================================================================================
+SECTION 4 - NETWORK PATH
+================================================================================
+
+4.1  FIND A USABLE BACKEND ADDRESS
+-----------------------------------------------------------
+     On sgapex26:
+         ip -4 addr show | grep inet
+
+     GOTCHA: `ip addr` NEVER shows an OCI public IP, because OCI does 1:1 NAT
+     at the network layer. Ours showed only 10.5.0.204. The instance metadata
+     service also omitted it:
+         curl -s -H "Authorization: Bearer Oracle" \
+              http://169.254.169.254/opc/v2/vnics/ | python3 -m json.tool
+
+     The PUBLIC IP was only visible in the OCI Console under
+     Instance -> Networking -> Primary VNIC (161.118.255.47, a reserved IP).
+     ALWAYS CHECK THE CONSOLE before concluding an instance is private-only.
+
+     Test reachability from the proxy:
+         curl -sS -m 5 -I http://10.5.0.204:8081/       # timed out (no peering)
+         curl -sS -m 5 -I http://161.118.255.47:8081/   # 200 OK
+
+     Interpreting failures:
+       Timeout            -> route exists, security list blocking
+       No route to host   -> different VCNs, no peering
+       200 OK             -> good
+
+
+4.2  FIREWALL THE BACKEND PORT
+-----------------------------------------------------------
+     OCI Console -> sgapex26's subnet -> Security List -> Add Ingress Rule:
+         Source Type: CIDR
+         Source CIDR: 168.138.161.207/32     (the proxy's egress IP)
+         Protocol:    TCP
+         Dest Port:   8081
+
+     Find the proxy's egress IP with:  curl -4 ifconfig.me
+
+     >>> ALSO REMOVE any broader rule allowing 8081 from 0.0.0.0/0. A
+     permissive rule defeats this one, and the backend serves the whole app
+     over plain HTTP with no TLS. <<<
+
+
+================================================================================
+SECTION 5 - NGINX REVERSE PROXY
+================================================================================
+
+5.1  FIND WHERE CONFIGS ACTUALLY LIVE
+-----------------------------------------------------------
+         grep -n include /etc/nginx/nginx.conf
+
+     Ours had a NON-OBVIOUS second include:
+         include /etc/nginx/conf.d/*.conf;
+         include /etc/nginx/conf.d/.conf/*.conf;      <-- hidden dot-directory
+
+     A glob like *.conf does NOT match hidden entries, so the dot-directory
+     only works because it is included explicitly. Put files in the wrong place
+     and nginx silently never reads them.
+
+
+5.2  >>> CHECK nginx -t BEFORE ANYTHING ELSE <<<
+-----------------------------------------------------------
+         nginx -t
+
+     WE FOUND A LATENT OUTAGE: a config file created six days earlier
+     referenced a fullchain.crt that did not exist yet:
+
+         nginx: [emerg] cannot load certificate ".../fullchain.crt"
+         nginx: configuration file test failed
+
+     THE WHOLE PROXY WOULD HAVE FAILED TO START on the next reboot, package
+     update, or restart, taking down EVERY domain on it (hris, mis, tomcat,
+     rnd). It had been in that state, unnoticed, for six days.
+
+     Why nothing had broken: `systemctl reload` on a broken config fails
+     SAFELY and leaves the running workers on the old config. Only a full
+     `restart` or a boot is fatal.
+
+     Neutralize immediately by renaming out of the glob:
+         mv .../yahyaagro.saadgroupbd.com.conf \
+            .../yahyaagro.saadgroupbd.com.conf.disabled
+         nginx -t
+
+     LESSON: On a shared reverse proxy, run `nginx -t` as a health check
+     regularly, not just after edits. Never leave a config referencing files
+     that don't exist yet.
+
+
+5.3  TEMPORARY HTTP-ONLY BLOCK (test the chain while waiting for the cert)
+-----------------------------------------------------------
+     Create /etc/nginx/conf.d/.conf/yahyaagro-temp.conf with a plain port 80
+     server block and the proxy_pass, and NO https redirect (a redirect before
+     the cert exists just breaks testing).
+
+         nginx -t && systemctl reload nginx
+         curl -I http://yahyaagro.saadgroupbd.com/ \
+              --resolve yahyaagro.saadgroupbd.com:80:168.138.161.207
+
+     --resolve forces the connection to a chosen IP while sending the correct
+     Host header. This tests the entire chain WITHOUT touching live DNS.
+     It is the single most useful command in this whole runbook.
+
+     Also confirm the rewrite survives the proxy hop:
+         curl -sI http://yahyaagro.saadgroupbd.com/manifest.json \
+              --resolve yahyaagro.saadgroupbd.com:80:168.138.161.207 \
+              | grep -iE 'content-type|content-length'
+
+
+5.4  INSTALL THE CERT
+-----------------------------------------------------------
+     Download the zip from Namecheap (check the TIMESTAMP - use the one from
+     after issuance; an older download will not match your key). Upload to
+     /var/tmp/ on sg-proxy-server.
+
+         cd /etc/nginx/ssl/yahyaagro.saadgroupbd.com
+         unzip -o /var/tmp/yahyaagro_saadgroupbd_com.zip -d .
+         ls -l
+         # yields: .crt, .ca-bundle, .p7b (ignore the .p7b)
+
+     ASSEMBLE THE FULLCHAIN - note the `echo`:
+         (cat yahyaagro_saadgroupbd_com.crt; echo; \
+          cat yahyaagro_saadgroupbd_com.ca-bundle) > fullchain.crt
+         grep -c "BEGIN CERTIFICATE" fullchain.crt      # expect 3-4 (ours: 4)
+
+     >>> THE `echo` IS MANDATORY. <<< Without a newline between the leaf and
+     the bundle, the two PEM blocks run together and nginx rejects the chain
+     or serves it incomplete.
+
+         cp yahyaagro_saadgroupbd_com.key privkey.key
+         chmod 600 privkey.key
+
+     >>> MODULUS MATCH - DO NOT PROCEED IF THESE DIFFER <<<
+         openssl x509 -noout -modulus -in fullchain.crt | openssl md5
+         openssl rsa  -noout -modulus -in privkey.key   | openssl md5
+         # ours: both 993b059ef4e5cba730ba5264cbb74837
+
+     A mismatch means the cert was issued against a different CSR than the
+     key you hold. Stop and investigate; do not reload.
+
+     INSPECT WHAT YOU ACTUALLY GOT:
+         openssl x509 -in fullchain.crt -noout -text | grep -A1 "Subject Alternative Name"
+         openssl x509 -in fullchain.crt -noout -dates
+         openssl x509 -in fullchain.crt -noout -issuer
+
+     Ours:
+         SAN:    yahyaagro.saadgroupbd.com, www.yahyaagro.saadgroupbd.com
+         Valid:  21 Sep 2026  ->  7 Apr 2027
+         Issuer: Sectigo Public Server Authentication CA DV R36
+
+     The SAN list decides whether www can also move. Do not trust the order
+     page's "Secures" line; read the signed cert.
+
+
+5.5  FINAL NGINX CONFIG
+-----------------------------------------------------------
+     Remove the temp and disabled files first (rm is aliased to rm -i for
+     root on Oracle Linux, so it will prompt - answer y):
+
+         rm /etc/nginx/conf.d/.conf/yahyaagro.saadgroupbd.com.conf.disabled
+         rm /etc/nginx/conf.d/.conf/yahyaagro-temp.conf
+
+     Two server blocks claiming the same server_name makes nginx pick one
+     arbitrarily and emit a conflict warning. Only one file should remain.
+
+     /etc/nginx/conf.d/.conf/yahyaagro.saadgroupbd.com.conf :
+
+     server {
+         listen 80;
+         server_name yahyaagro.saadgroupbd.com www.yahyaagro.saadgroupbd.com;
+         return 301 https://$host$request_uri;
+     }
+
+     server {
+         listen 443 ssl;
+         http2 on;
+         server_name yahyaagro.saadgroupbd.com www.yahyaagro.saadgroupbd.com;
+
+         ssl_certificate     /etc/nginx/ssl/yahyaagro.saadgroupbd.com/fullchain.crt;
+         ssl_certificate_key /etc/nginx/ssl/yahyaagro.saadgroupbd.com/privkey.key;
+         ssl_protocols       TLSv1.2 TLSv1.3;
+         ssl_prefer_server_ciphers off;
+         ssl_session_cache   shared:SSL:10m;
+         ssl_session_timeout 1d;
+
+         location / {
+             proxy_pass http://161.118.255.47:8081;
+             proxy_http_version 1.1;
+             proxy_set_header Host $host;
+             proxy_set_header X-Real-IP $remote_addr;
+             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+             proxy_set_header X-Forwarded-Proto $scheme;
+             proxy_buffering on;
+             proxy_read_timeout 60s;
+         }
+     }
+
+     NOTE: `http2 on;` requires nginx >= 1.25.1. On older builds use
+     `listen 443 ssl http2;` instead.
+
+     HSTS deliberately omitted. It is a commitment that is hard to undo, so
+     add it only after several days of confirmed clean running.
+
+         nginx -t && systemctl reload nginx
+
+     >>> NEVER reload without a passing nginx -t on a shared proxy. <<<
+     reload is graceful (old workers finish in-flight requests), so live
+     domains see no dropped connections.
+
+
+5.6  VERIFY BEFORE TOUCHING DNS
+-----------------------------------------------------------
+         curl -I https://yahyaagro.saadgroupbd.com \
+              --resolve yahyaagro.saadgroupbd.com:443:168.138.161.207
+
+         curl -I https://www.yahyaagro.saadgroupbd.com \
+              --resolve www.yahyaagro.saadgroupbd.com:443:168.138.161.207
+
+         curl -I http://yahyaagro.saadgroupbd.com \
+              --resolve yahyaagro.saadgroupbd.com:80:168.138.161.207
+
+     EXPECT: 200, 200, 301.
+
+     >>> DO NOT USE -k. <<< The absence of -k is the test. A clean 200 with no
+     certificate error proves the chain is correctly assembled and browsers
+     will trust it. Using -k hides exactly the failure you are checking for.
+
+     A NOTE ON READING CONFIG FILES: if terminal output appears to show
+     markdown link syntax around hostnames, e.g.
+         server_name x.com [www.x.com](https://www.x.com);
+     that is a DISPLAY/copy-paste artifact, not file content. Verify with:
+         grep -c '\[' <file>      # 0 means the file is clean
+     We wasted time "fixing" a file that was already correct. The tell was
+     that openssl output showed the same artifact, and openssl cannot emit
+     markdown. Trust curl results over rendered text.
+
+
+================================================================================
+SECTION 6 - BROWSER TEST (before DNS, if at all possible)
+================================================================================
+
+     Add to C:\Windows\System32\drivers\etc\hosts (Notepad as Administrator):
+
+         168.138.161.207  yahyaagro.saadgroupbd.com
+
+     Then:  ipconfig /flushdns
+     Open:  https://yahyaagro.saadgroupbd.com/
+
+     CHECKLIST:
+       [ ] Padlock valid, no warning
+       [ ] App boots, splash clears
+       [ ] LOG IN WITH A REAL ACCOUNT   <-- the only test of the ORDS path
+       [ ] Several main screens
+       [ ] Hard-refresh on a deep route (e.g. /login) - tests direct URL entry
+       [ ] animal-passport.html - separate code path, own ORDS endpoint
+       [ ] DevTools Console (F12) clear
+           - "SyntaxError: Unexpected token '<'" means an asset returned HTML
+       [ ] Version badge shows the build you intended
+
+     REMOVE THE HOSTS ENTRY AFTERWARDS or you will not see what users see.
+
+     IF LOGIN FAILS WITH A CORS ERROR WHILE TESTING OVER PLAIN HTTP: the
+     browser sends Origin: http://... and ORDS may only whitelist https://...
+     Retest over HTTPS before changing any config.
+
+     Everything verified by curl proves only that FILES ARE SERVED. It proves
+     nothing about whether the app FUNCTIONS. Do not skip this step.
+
+
+================================================================================
+SECTION 7 - DNS CUTOVER (the only step that touches live traffic)
+================================================================================
+
+     Pre-check:
+         dig +short yahyaagro.saadgroupbd.com        # should still be old IP
+         dig +noall +answer yahyaagro.saadgroupbd.com # TTL must be 300
+
+     In cPanel Zone Editor, edit:
+         yahyaagro.saadgroupbd.com.      A   ->  168.138.161.207
+         www.yahyaagro.saadgroupbd.com.  A   ->  168.138.161.207
+
+     Change NOTHING else. Not MX, not SPF, not the DCV CNAME, not other
+     subdomains, not the apex.
+
+     STAGED OPTION (recommended if skipping the hosts-file test): change the
+     bare domain only, verify login, then change www. Halves exposure and
+     leaves a working comparison point.
+
+     BE AT YOUR DESK WITH THE DNS PANEL OPEN. The whole value of a 300s TTL
+     is fast rollback, and that only helps if you are watching.
+
+
+     MONITORING - the useful command is the Server header, not dig:
+         curl -sI https://yahyaagro.saadgroupbd.com | grep -i server
+             Server: LiteSpeed     -> still the old shared host
+             Server: nginx/1.27.0  -> live on the new stack
+
+         for i in {1..10}; do
+             curl -sI https://yahyaagro.saadgroupbd.com | grep -i server
+             sleep 10
+         done
+
+     GOTCHA - YOUR OWN SERVERS WILL LIE TO YOU: OCI instances resolve via
+     169.254.169.254, which cached the old answer while the TTL was still
+     14400. Ours kept returning the old IP long after the world had moved.
+     This is a local cache, not a failure. Check what the outside world sees:
+
+         dig 8.8.8.8 +short yahyaagro.saadgroupbd.com
+
+         curl -sI https://yahyaagro.saadgroupbd.com \
+              --resolve yahyaagro.saadgroupbd.com:443:$(dig 8.8.8.8 +short yahyaagro.saadgroupbd.com) \
+              | grep -iE '^HTTP|server'
+
+     That last command is the definitive "is the public internet reaching my
+     new stack" test. For a global view, use dnschecker.org.
+
+
+     ROLLBACK (about 5 minutes):
+         Set both A records back to 199.188.201.114.
+     Works because: the old host was never modified, its cert was NOT revoked
+     by the reissue, and the TTL is 300.
+
+
+================================================================================
+SECTION 8 - POST-CUTOVER VERIFICATION
+================================================================================
+
+8.1  PERFORMANCE BASELINE
+-----------------------------------------------------------
+     Always send the gzip header, or you measure the wrong thing:
+
+         curl -o /dev/null -sw 'total:%{time_total} size:%{size_download}\n' \
+              -H 'Accept-Encoding: gzip' \
+              https://yahyaagro.saadgroupbd.com/main.dart.js
+
+         curl -o /dev/null -sw 'total:%{time_total} size:%{size_download}\n' \
+              -H 'Accept-Encoding: gzip' \
+              http://161.118.255.47:8081/main.dart.js
+
+     Compare against the OLD host (still reachable by IP):
+         curl -o /dev/null -sw 'total:%{time_total} size:%{size_download}\n' \
+              https://yahyaagro.saadgroupbd.com/main.dart.js \
+              --resolve yahyaagro.saadgroupbd.com:443:199.188.201.114
+
+     Break down where time goes:
+         curl -o /dev/null -sw 'dns:%{time_namelookup} tcp:%{time_connect} tls:%{time_appconnect} ttfb:%{time_starttransfer} total:%{time_total}\n' \
+              https://yahyaagro.saadgroupbd.com/main.dart.js
+
+     OUR RESULTS:
+         via proxy (gzip):   0.711s   2,377,666 bytes
+         direct backend:     0.354s   2,377,666 bytes
+         OLD shared host:    2.828s   8,541,535 bytes
+         breakdown: dns 0.004 / tcp 0.005 / tls 0.106 / ttfb 0.107 / total 0.141
+
+     INTERPRETATION: the new stack is ~20x faster than the shared host it
+     replaced. TLS handshake (~106ms) accounts for essentially all pre-transfer
+     time; the backend hop adds ~1ms. The proxy is not a bottleneck.
+
+     Confirm gzip is active:
+         curl -sI -H 'Accept-Encoding: gzip' \
+              https://yahyaagro.saadgroupbd.com/main.dart.js \
+              | grep -iE 'content-encoding|content-length'
+
+     "IT FEELS SLOWER THAN THE IP" is expected and not a fault: hitting
+     http://IP:8081 skips TLS negotiation AND one network hop. The question is
+     whether the domain is too slow for users, not whether it beats the most
+     direct possible path.
+
+     THE REAL PERFORMANCE ISSUE IS THE BUNDLE: 8.5 MB raw / 2.38 MB gzipped,
+     re-downloaded on every visit because main.dart.js is no-cache. See 10.6.
+
+
+================================================================================
+SECTION 9 - ROUTINE APP UPDATES (file transfer + deploy)
+================================================================================
+This is the day-to-day procedure for pushing a new Flutter build to production.
+Nothing here touches DNS, certs, or nginx. The app is static, so Apache picks
+up new files immediately - NO httpd reload is needed, which means routine
+deploys do NOT disturb the PHP application sharing this Apache instance.
+
+
+9.1  ONE-TIME SETUP: LET sm RUN THE DEPLOY WITHOUT FULL ROOT
+-----------------------------------------------------------
+     The script must run as root because it writes to an apache-owned docroot
+     and calls chown and restorecon. Rather than giving sm broad root, grant
+     exactly one command.
+
+     As root:
+         visudo -f /etc/sudoers.d/sams-deploy
+
+     Contents (single line):
+         sm ALL=(root) NOPASSWD: /usr/local/bin/deploy-sams.sh
+
+     >>> THE SCRIPT MUST NOT BE WRITABLE BY sm. <<< If sm could edit a script
+     it is allowed to run as root, that sudo rule is equivalent to full root.
+         chown root:root /usr/local/bin/deploy-sams.sh
+         chmod 755       /usr/local/bin/deploy-sams.sh
+         ls -l           /usr/local/bin/deploy-sams.sh
+         # must show: -rwxr-xr-x  root root
+
+     Verify as sm:
+         sudo -l
+         # should list ONLY the deploy script, with NOPASSWD
+
+     Note: the rule allows sm to pass ANY path as the argument, not just paths
+     under /u01/sams-deploy. Acceptable here because sm is the account that
+     uploads the builds anyway. To tighten it, hardcode the directory in the
+     script and accept only a build number.
+
+
+9.2  TRANSFER THE BUILD
+-----------------------------------------------------------
+     Developer side:
+         flutter build web --release
+         # zip the CONTENTS of build/web  ->  <n>.zip
+
+     Upload with WinSCP (or scp) as user sm to:
+         /u01/sams-deploy/
+
+     Files land owned by sm:sm, which is correct - the deploy script handles
+     ownership when it copies into the docroot.
+
+     >>> KEEP THE OLD ZIPS. <<< They are currently your ONLY rollback path.
+     Do not overwrite or delete the previous build.
+         ls -lt /u01/sams-deploy/
+     Five zips is about 75 MB and buys you a manual rollback.
+
+
+9.3  PRE-DEPLOY SANITY CHECK (one line, worth the habit)
+-----------------------------------------------------------
+         unzip -l /u01/sams-deploy/<n>.zip | grep -c index.html
+
+     Expect 1. If it returns 0 the zip is bad or truncated - DO NOT DEPLOY.
+     The script's guard (9.5) also catches this, but checking first avoids
+     even starting.
+
+
+9.4  RUN THE DEPLOY
+-----------------------------------------------------------
+     As sm, from any directory (both paths are absolute):
+
+         sudo /usr/local/bin/deploy-sams.sh /u01/sams-deploy/<n>.zip
+
+     As root, the sudo is unnecessary but harmless:
+         /usr/local/bin/deploy-sams.sh /u01/sams-deploy/<n>.zip
+
+     Running WITHOUT sudo as sm will fail at chown/restorecon.
+
+
+9.5  THE DEPLOY SCRIPT  /usr/local/bin/deploy-sams.sh
+-----------------------------------------------------------
+     #!/bin/bash
+     set -e
+     ZIP_PATH="$1"
+
+     if [ -z "$ZIP_PATH" ] || [ ! -f "$ZIP_PATH" ]; then
+         echo "Usage: deploy-sams.sh /path/to/build.zip"
+         exit 1
+     fi
+
+     WORKDIR=$(mktemp -d /tmp/sams-deploy.XXXXXX)
+     unzip -oq "$ZIP_PATH" -d "$WORKDIR"
+
+     SRC="$WORKDIR"
+     if [ ! -f "$SRC/index.html" ]; then
+         SRC=$(find "$WORKDIR" -maxdepth 2 -name index.html -exec dirname {} \; | head -1)
+     fi
+
+     if [ -z "$SRC" ] || [ ! -f "$SRC/index.html" ]; then
+         echo "ERROR: index.html not found in zip. Aborting, nothing changed."
+         rm -rf "$WORKDIR"
+         exit 1
+     fi
+
+     rm -rf /var/www/sams-prod/*
+     cp -r "$SRC"/* /var/www/sams-prod/
+     cp /u01/sams-static/* /var/www/sams-prod/ 2>/dev/null || true
+     chown -R apache:apache /var/www/sams-prod
+     restorecon -Rv /var/www/sams-prod
+
+     rm -rf "$WORKDIR"
+     echo "Deployed successfully: $(date)"
+
+     WHY EACH PIECE EXISTS:
+       - mktemp + unzip to a tempdir: the zip normally contains a NESTED
+         folder (e.g. 34/) rather than index.html at the top.
+       - find -maxdepth 2 ... | head -1: locates that nested folder. The
+         `head -1` prevents a multi-match from corrupting SRC.
+       - THE GUARD BLOCK IS THE IMPORTANT PART. Without it, a zip containing
+         no index.html leaves SRC empty, so `"$SRC"/*` expands to `/*` and
+         line `cp -r "$SRC"/*` becomes `cp -r /* /var/www/sams-prod/` -
+         attempting to copy the ENTIRE ROOT FILESYSTEM into the docroot,
+         AFTER the rm -rf has already emptied it. Site down and messy.
+         The guard exits BEFORE the rm -rf, so a bad zip changes nothing.
+       - cp /u01/sams-static/*: restores hand-placed files the build does not
+         contain (currently animal-passport.html). The rm -rf wipes them
+         every time, so they must be re-copied. See 10.3.
+       - chown + restorecon: apache ownership and SELinux context, both
+         required on RHEL-family.
+       - NO httpd reload: static files are read from disk per request.
+
+
+9.6  TEST THE GUARD (do this once, after any edit to the script)
+-----------------------------------------------------------
+         sudo cp /usr/local/bin/deploy-sams.sh /usr/local/bin/deploy-sams.sh.bak
+
+         mkdir -p /tmp/badtest && echo hello > /tmp/badtest/readme.txt
+         cd /tmp/badtest && zip -q /tmp/bad.zip readme.txt
+         /usr/local/bin/deploy-sams.sh /tmp/bad.zip
+
+     EXPECT: "ERROR: index.html not found in zip. Aborting, nothing changed."
+     Then confirm production is untouched:
+         curl -s http://localhost:8081/version.json; echo
+         ls /var/www/sams-prod/ | head
+     Unchanged version and files present = the guard works.
+
+
+9.7  POST-DEPLOY VERIFICATION (run every time)
+-----------------------------------------------------------
+         curl -s  http://localhost:8081/version.json; echo
+         curl -sI http://localhost:8081/manifest.json         | grep -i content-length
+         curl -sI http://localhost:8081/animal-passport.html  | grep -i content-length
+         curl -sI https://yahyaagro.saadgroupbd.com           | grep -i server
+
+     EXPECTED / WHAT A FAILURE MEANS:
+       version.json    -> the NEW build number. Unchanged means you deployed
+                          the same zip twice, or the copy silently failed.
+       manifest.json   -> 1043. If it returns 11943 (index.html's size), the
+                          SPA rewrite is swallowing real files.
+       animal-passport -> 33723. If 11943 or missing, the /u01/sams-static
+                          overlay did not apply and that page is silently
+                          broken (it returns 200 serving the app, not a 404).
+       Server header   -> nginx/1.27.0
+
+     Then load the app in a browser and LOG IN. curl proves files are served;
+     only a login proves the app works.
+
+
+9.8  ROLLBACK (current approach - manual)
+-----------------------------------------------------------
+         sudo /usr/local/bin/deploy-sams.sh /u01/sams-deploy/<previous-n>.zip
+
+     This is why 9.2 says keep the old zips. If the previous zip is gone, the
+     only route back is asking the developer to rebuild it.
+
+
+9.9  KNOWN RISKS OF THIS APPROACH (accepted, not fixed)
+-----------------------------------------------------------
+     a) BRIEF BROKEN WINDOW. `rm -rf` then an 8.5 MB copy means a second or
+        two where requests get 404s or a partial app. Self-recovering. Prefer
+        deploying outside peak hours.
+
+     b) NO INSTANT ROLLBACK. Recovery means a full redeploy of the previous
+        zip, and depends on that zip still existing.
+
+     c) The guard in 9.5 closes the worst failure (empty SRC), but the deploy
+        is still destructive-then-copy rather than atomic.
+
+     BETTER APPROACH FOR FREQUENT DEPLOYS - release dirs + symlink swap:
+        /var/www/sams-releases/<timestamp>/   one directory per release
+        /var/www/sams-current -> symlink, flipped atomically with `mv -Tf`
+        DocumentRoot points at the symlink.
+     Deploys become atomic (no broken window) and rollback becomes a symlink
+     flip taking seconds:
+        ln -sfn /var/www/sams-releases/<previous> /var/www/sams-current
+     Requires: create the releases dir, apply semanage fcontext to it, change
+     DocumentRoot and <Directory> in sams-prod.conf, and prune old releases.
+     Roughly 20 minutes of work. Recommended if deploy frequency is high.
+
+
+9.10 COEXISTENCE WITH THE PHP APPLICATION ON sgapex26
+-----------------------------------------------------------
+     A PHP app shares this Apache instance (/etc/httpd/conf.d/php.conf).
+     Routine deploys do NOT affect it, because the deploy script performs no
+     httpd reload.
+
+     What COULD cause a conflict, and how to check:
+
+       PORT COLLISION - two vhosts on the same port; Apache resolves by
+       ServerName and falls back to the FIRST block defined, which presents as
+       "wrong app served".
+           httpd -S
+           grep -rn 'Listen' /etc/httpd/conf/httpd.conf /etc/httpd/conf.d/*.conf
+
+       SHARED DOCROOT - if PHP files live under /var/www/sams-prod, the SPA
+       rewrite would swallow their URLs, AND the deploy's rm -rf would DELETE
+       THEM. Verify they are separate:
+           ls -la /var/www/
+           find /var/www/sams-prod -name '*.php' | head
+
+       COMPETING REWRITE RULES:
+           grep -rln 'RewriteEngine\|RewriteRule' /etc/httpd/conf.d/ /etc/httpd/conf/httpd.conf
+
+       SHARED RESTART - only relevant when EDITING sams-prod.conf, not when
+       deploying. A broken config stops the whole instance from starting and
+       takes the PHP app down with it. So always:
+           apachectl configtest        # BEFORE any reload
+           systemctl reload httpd
+
+
+================================================================================
+SECTION 10 - OUTSTANDING ITEMS
+================================================================================
+
+10.1  [HIGH] CERT RENEWAL BY 7 APRIL 2027
+     Reissues carry the remaining period, so this is ~6.5 months not a year.
+     Set a reminder for mid-March 2027. STRONGLY CONSIDER certbot with the
+     nginx plugin at renewal: nginx already terminates TLS and you control
+     DNS, so auto-renewal would remove this entire manual CSR/DCV cycle.
+
+10.2  [HIGH] DO NOT CANCEL THE NAMECHEAP SHARED HOSTING
+     It holds three things you still depend on:
+       - the DNS zone (dns1.namecheaphosting.com, edited via cPanel Zone Editor)
+       - mail (MX records and SPF include:spf.web-hosting.com)
+       - your rollback target
+     Moving off it requires migrating DNS first, then mail. Separate project.
+
+10.3  [MED] animal-passport.html INTO THE FLUTTER BUILD
+     Retires the /u01/sams-static workaround.
+
+10.4  [MED] REVERT PermitRootLogin ON BOTH SERVERS
+     Enabled for convenience during setup. Return to key-only.
+
+10.5  [MED] LOCAL PEERING GATEWAY BETWEEN THE TWO VCNs
+     Removes the public round-trip between proxy and backend. Requires an LPG
+     on each VCN plus route rules. CIDRs (172.16.1.0/24, 10.5.0.0/24) do not
+     overlap, so this is clean when you get to it.
+
+10.6  [MED] CONTENT-HASHED FILENAMES
+     Current no-cache on main.dart.js means 2.38 MB on every visit. Ask the
+     developer to emit hashed filenames (main.<hash>.dart.js). Then cache
+     those aggressively and leave only index.html uncached: new deploys get
+     new names, so users fetch fresh automatically and cache everything else.
+     Interim: drop `no-store` and keep `no-cache` so the browser can revalidate
+     via ETag and get a 304 with no body.
+
+10.7  [LOW] API KEYS IN THE CLIENT BUNDLE
+     main.dart.js references Groq and Google generative AI endpoints. A Flutter
+     web build ships as readable JavaScript, so any embedded key is public.
+     Pre-existing, not caused by this migration. Raise with the developer;
+     these calls belong behind the ORDS layer.
+
+10.8  [LOW] UNKNOWN HARDCODED ADDRESS 172.16.83.26
+     Appears in main.dart.js. Not the proxy, not sgapex26. Likely dead code or
+     a dev leftover. Confirm with the developer.
+
+10.9  [LOW] STALE DCV CNAMEs IN THE ZONE
+     Leftover records for mis (comodoca) and rnd (ssl.com) at TTL 14400.
+     Harmless. Clean up when nothing is pending.
+
+10.10 [LOW] DUPLICATE MIME WARNINGS
+     nginx -t reports duplicate "text/html" in mis.saadgroupbd.com.conf lines
+     41 and 58. Pre-existing and cosmetic.
+
+
+================================================================================
+SECTION 11 - LESSONS / GOTCHA INDEX
+================================================================================
+
+ 1. Apache 2.4.62: "RewriteBase /" is invalid directly inside <VirtualHost>.
+
+ 2. %{REQUEST_FILENAME} does NOT resolve to a disk path in vhost context. It
+    stays as the bare URI, so -f is always false and every request rewrites to
+    index.html. Use %{DOCUMENT_ROOT}%{REQUEST_URI} instead. Symptom in the
+    browser: SyntaxError: Unexpected token '<'.
+
+ 3. A typo or extra suffix in nginx server_name does not error. Nginx silently
+    falls through to another default vhost, presenting as a random redirect.
+
+ 4. Duplicate/round-robin A records make requests randomly hit old and new
+    hosts. Looks like intermittent SSL failure; it is purely DNS. Check every
+    row for that hostname, including non-adjacent and paginated ones.
+
+ 5. Lower the DNS TTL FIRST. It only takes effect after one old-TTL cycle.
+
+ 6. Namecheap "shared hosting tool" certs have no downloadable key. A reissue
+    with your own CSR is the only way to move a cert to your own server.
+
+ 7. A reissue does NOT revoke the old cert (same domain), which preserves
+    rollback. It DOES carry only the remaining validity period.
+
+ 8. A NEW CSR MEANS A NEW DCV CNAME. An old validation record does not count,
+    and the panel may still show a misleading green tick for it.
+
+ 9. Namecheap Hosting DNS means cPanel Zone Editor, not the Advanced DNS tab.
+    Check the SOA to find out which applies.
+
+10. `ip addr` never shows an OCI public IP (1:1 NAT), and the metadata service
+    may omit a reserved one. Check the Console.
+
+11. `nginx -t` on a shared proxy is a health check, not just a pre-edit step.
+    A config referencing a nonexistent cert is a time bomb that only detonates
+    on full restart or reboot.
+
+12. `curl --resolve` lets you test the entire chain, TLS included, without
+    touching live DNS. The most valuable tool in this process.
+
+13. Never use `curl -k` for final cert verification. The absence of -k IS the test.
+
+14. The fullchain needs an explicit newline between leaf and bundle.
+
+15. Always run the cert/key modulus MD5 comparison before reloading.
+
+16. Flutter's main.dart.js has no content hash, so long JS cache rules make
+    deploys invisible to returning users for the cache lifetime.
+
+17. Use %{DOCUMENT_ROOT}%{REQUEST_URI} in SPA rewrites, or real files get
+    swallowed and returned as index.html.
+
+18. An SPA rewrite turns missing-file 404s into silent 200s serving index.html.
+    Grep the bundle for hardcoded URLs to find orphaned files before cutover.
+    Watch for index.html's byte size appearing where it shouldn't.
+
+19. A deploy script that wipes the docroot will delete any hand-placed file.
+
+20. Your own servers' resolvers cache aggressively. Verify propagation with
+    8.8.8.8 and the Server response header, not local dig.
+
+21. Compare like with like in performance tests: send Accept-Encoding: gzip
+    to both endpoints, or gzip makes one look artificially slow.
+
+22. Direct-to-IP will always beat domain-over-TLS-through-a-proxy. That gap is
+    TLS plus a hop, not a misconfiguration.
+
+23. Markdown-looking brackets in terminal output are a display artifact.
+    Verify with `grep -c '\['` before "fixing" a file that is already correct.
+
+24. curl proves files are served. Only a browser login proves the app works.
+
+
+
+25. A sudo rule for a script is only as safe as the script's permissions.
+    If the invoking user can edit a script they may run as root, that rule is
+    equivalent to full root. Keep it root:root 755.
+
+26. An unguarded $SRC in a deploy script is a loaded gun: if it is empty,
+    "$SRC"/* expands to /* and cp walks the whole filesystem - after the
+    rm -rf has already emptied the docroot. Validate BEFORE destroying.
+
+
+================================================================================
+SECTION 12 - QUICK REFERENCE
+================================================================================
+
+HOSTS
+    sg-proxy-server   168.138.X.X (public) / 172.16.1.35 (private, VCN A)
+    sgapex26          161.118.(public) / 10.5.0.204  (private, VCN B)
+    old shared host   199.188.
+
+PATHS
+    App docroot       /var/www/sams-prod
+    Apache vhost      /etc/httpd/conf.d/sams-prod.conf
+    Nginx vhost       /etc/nginx/conf.d/.conf/yahyaagro.saadgroupbd.com.conf
+    Certs             /etc/nginx/ssl/yahyaagro.saadgroupbd.com/
+    Deploy script     /usr/local/bin/deploy-sams.sh
+    Build staging     /u01/sams-deploy/
+    Static overlay    /u01/sams-static/
+
+DEPLOY A NEW BUILD   (full procedure: SECTION 9)
+    Upload <n>.zip to /u01/sams-deploy/ as user sm, then as sm:
+        unzip -l /u01/sams-deploy/<n>.zip | grep -c index.html    # expect 1
+        sudo /usr/local/bin/deploy-sams.sh /u01/sams-deploy/<n>.zip
+        curl -s  http://localhost:8081/version.json
+        curl -sI http://localhost:8081/manifest.json        | grep -i content-length  # 1043
+        curl -sI http://localhost:8081/animal-passport.html | grep -i content-length  # 33723
+    No httpd reload required. Keep old zips - they are the only rollback path.
+    Rollback: redeploy the previous zip.
+
+</li>
 <li>OCI networking: DRG, RPC, IAM</li>
 </ul>
 <pre><code class="language-sql">SELECT name, open_mode FROM v$database;
