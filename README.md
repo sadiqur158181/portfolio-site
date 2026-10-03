@@ -23,3 +23,9 @@ Static site (HTML, CSS, JS). No build step. Hosted on GitHub Pages.
 4. At your domain registrar's DNS:
    - Apex domain (example.com): four A records to 185.199.108.153, 185.199.109.153, 185.199.110.153, 185.199.111.153
    - www: CNAME to `YOUR-GITHUB.github.io`
+
+## Write a post (no git needed)
+1. Open `/compose.html` on your site, write, check the preview, click **Publish on GitHub**.
+2. On the GitHub page click **Commit changes**. A GitHub Action rebuilds `posts/posts.json` within a minute and the post appears.
+3. Run `git pull` before your next local push, because the Action adds a commit.
+Each post is one file in `posts/` with a header (title, date, tags, summary). Do not edit `posts.json` by hand any more.

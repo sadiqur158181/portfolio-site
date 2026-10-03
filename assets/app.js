@@ -20,7 +20,7 @@ async function renderPost(){
   const posts=await getJSON('posts/posts.json')||[];
   const meta=posts.find(p=>p.slug===slug);
   if(!meta){host.innerHTML='<h1>Post not found</h1><p><a href="blog.html">Back to all posts</a></p>';return}
-  const md=await (await fetch(`posts/${encodeURIComponent(slug)}.md`)).text();
+  const md=(await (await fetch(`posts/${encodeURIComponent(slug)}.md`)).text()).replace(/^---[\s\S]*?\n---\s*/,'');
   document.title=meta.title+' | Sadiqur Rahman';
   host.innerHTML=`<small>${fmt(meta.date)}</small><h1>${esc(meta.title)}</h1><div>${(meta.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>${marked.parse(md)}`;
   if(window.hljs)host.querySelectorAll('pre code').forEach(b=>hljs.highlightElement(b));

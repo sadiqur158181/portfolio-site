@@ -1,19 +1,25 @@
-<!doctype html><html lang="en"><head><title>Sadiqur Rahman | Oracle Apps DBA and Multi-Cloud Engineer</title><meta name="description" content="Oracle EBS R12.2, RAC, APEX/ORDS and multi-cloud (OCI, AWS, Azure) engineer based in Dhaka."><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;600&display=swap" rel="stylesheet"><link rel="stylesheet" href="assets/style.css"></head><body><header class="top"><div class="wrap"><a class="brand" href="index.html">Sadiqur Rahman</a><nav><a href="index.html#experience">Experience</a><a href="blog.html">Blog</a><a href="index.html#library">Library</a><a href="index.html#contact">Contact</a></nav></div></header>
+<!doctype html><html lang="en"><head><title>Sadiqur Rahman | Oracle Apps DBA and Multi-Cloud Engineer</title><meta property="og:title" content="Sadiqur Rahman | Oracle Apps DBA"><meta name="description" content="Oracle EBS R12.2, RAC, APEX/ORDS and multi-cloud (OCI, AWS, Azure) engineer based in Dhaka."><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=JetBrains+Mono:wght@400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;600&display=swap" rel="stylesheet"><link rel="stylesheet" href="assets/style.css"></head><body><header class="top"><div class="wrap"><a class="brand" href="index.html">Sadiqur Rahman</a><nav><a href="index.html#experience">Experience</a><a href="blog.html">Blog</a><a href="index.html#library">Library</a><a href="index.html#contact">Contact</a></nav></div></header>
 <main>
-<div class="wrap hero">
+<div class="herobg"><div class="wrap hero">
  <div>
   <h1>Sadiqur Rahman</h1>
   <p class="lead">Apps DBA and multi-cloud engineer in Dhaka. I run Oracle EBS R12.2, RAC and APEX/ORDS in production, from provisioning to disaster recovery.</p>
   <div class="btns"><a class="btn primary" href="blog.html">Read the blog</a><a class="btn" href="#library">Documents</a></div>
  </div>
- <svg class="diagram" viewBox="0 0 400 330" role="img" aria-label="Two-node Oracle RAC cluster sharing ASM storage over a private interconnect">
-  <rect class="box" x="20" y="30" width="130" height="80" rx="10"/><text x="85" y="66" text-anchor="middle">Node 1</text><text class="sub" x="85" y="86" text-anchor="middle">Oracle 19c instance</text>
-  <rect class="box" x="250" y="30" width="130" height="80" rx="10"/><text x="315" y="66" text-anchor="middle">Node 2</text><text class="sub" x="315" y="86" text-anchor="middle">Oracle 19c instance</text>
-  <path class="wire" d="M150 70H250"/><path class="pulse" d="M150 70H250"/><text class="sub" x="200" y="58" text-anchor="middle">interconnect</text>
-  <path class="wire" d="M85 110V200M315 110V200"/><path class="pulse" d="M85 110V200M315 110V200"/>
-  <rect class="box" x="20" y="200" width="360" height="90" rx="10"/><text x="200" y="240" text-anchor="middle">ASM shared storage</text><text class="sub" x="200" y="262" text-anchor="middle">on OCI and VMware ESXi</text>
- </svg>
-</div>
+ <div class="console" role="img" aria-label="Terminal output showing a two-node Oracle RAC cluster with all services online">
+  <div class="bar"><i></i><i></i><i></i></div>
+  <p style="--i:0"><span class="c">$</span> crsctl check cluster -all</p>
+  <p style="--i:1">racnode1:</p>
+  <p style="--i:2">CRS-4537: Cluster Ready Services is <span class="ok">online</span></p>
+  <p style="--i:3">CRS-4529: Cluster Synchronization Services is <span class="ok">online</span></p>
+  <p style="--i:4">racnode2:</p>
+  <p style="--i:5">CRS-4537: Cluster Ready Services is <span class="ok">online</span></p>
+  <p style="--i:6">CRS-4529: Cluster Synchronization Services is <span class="ok">online</span></p>
+  <p style="--i:7"><span class="c">$</span> srvctl status database -d racdb</p>
+  <p style="--i:8">Instance racdb1 is running on node racnode1</p>
+  <p style="--i:9">Instance racdb2 is running on node racnode2</p>
+ </div>
+</div></div>
 
 <section id="about"><div class="wrap two">
  <div><h2>About</h2><p>I own Oracle environments end to end: Apps DBA, cloud and APEX/ORDS administration, with no dependency on an outside team. My work spans EBS cloning and upgrades, database version upgrades with AutoUpgrade, RMAN recovery, Data Guard, and OCI networking.</p><p>B.Sc. in Computer Science and Engineering, Daffodil International University. I work in English and Bangla.</p></div>
@@ -30,7 +36,7 @@
   <li>Design DR with Data Guard and recover with RMAN and controlfile techniques.</li>
   <li>Deploy APEX 22–26 and ORDS 21–26 on Tomcat 9 and 10 behind an nginx reverse proxy.</li>
   <li>Configure OCI DRG, RPC, cross-region VCN peering, cross-tenancy IAM and Block Volume backup replication.</li></ul></div>
- <div class="job"><h3>IT Executive</h3><div class="meta">Saad Group, Dhaka · Feb 2022 to Oct 2023</div><ul>
+ <div class="job"><h3>IT Support Executive</h3><div class="meta">Saad Group, Dhaka · Feb 2022 to Oct 2023</div><ul>
   <li>End-to-end IT support across departments: hardware, software, networking and user accounts.</li>
   <li>Administered internal servers and helpdesk; managed DNS and domain configuration across branches.</li></ul></div>
 </div></div></section>

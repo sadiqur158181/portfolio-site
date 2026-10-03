@@ -1,3 +1,11 @@
 [
-  {"slug":"hello-world","title":"What I will write about here","date":"2026-10-03","summary":"Oracle EBS, RAC, APEX/ORDS and OCI notes from production work.","tags":["meta"]}
+  {
+    "slug": "hello-world",
+    "title": "What I will write about here",
+    "date": "2026-10-03",
+    "summary": "Oracle EBS, RAC, APEX/ORDS and OCI notes from production work.",
+    "tags": [
+      "meta"
+    ]
+  }
 ]

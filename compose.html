@@ -1,0 +1,31 @@
+<!doctype html><html lang="en"><head><title>Write a post</title><meta name="robots" content="noindex"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;600&display=swap" rel="stylesheet"><link rel="stylesheet" href="assets/style.css"></head><body><header class="top"><div class="wrap"><a class="brand" href="index.html">Sadiqur Rahman</a><nav><a href="index.html#experience">Experience</a><a href="blog.html">Blog</a><a href="index.html#library">Library</a><a href="index.html#contact">Contact</a></nav></div></header>
+<main class="wrap"><div class="pagehead"><h1>Write a post</h1><p style="color:var(--muted)">Write in Markdown, check the preview, then publish to GitHub. Publishing needs your GitHub login.</p></div>
+<div class="composer">
+ <div>
+  <label for="t">Title</label><input id="t">
+  <label for="s">File name (slug)</label><input id="s" placeholder="auto from title">
+  <label for="d">Date</label><input id="d" type="date">
+  <label for="g">Tags (comma separated)</label><input id="g" placeholder="oracle, rac">
+  <label for="u">Summary (one sentence)</label><input id="u">
+  <label for="b">Post (Markdown)</label><textarea id="b"></textarea>
+  <div class="btns" style="margin-top:14px"><button class="btn primary" id="pub">Publish on GitHub</button><button class="btn" id="cp">Copy file</button><button class="btn" id="dl">Download .md</button></div>
+  <p id="msg" style="color:var(--muted);font-size:15px"></p>
+ </div>
+ <div class="preview post" id="pv" style="font-family:'IBM Plex Serif',Georgia,serif"></div>
+</div></main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script>
+const REPO='sadiqur158181/portfolio-site',BR='main';
+const $=i=>document.getElementById(i);
+$('d').value=new Date().toISOString().slice(0,10);
+const slug=()=>$('s').value.trim()||$('t').value.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+const file=()=>'---\ntitle: '+$('t').value.trim()+'\ndate: '+$('d').value+'\ntags: '+$('g').value.trim()+'\nsummary: '+$('u').value.trim()+'\n---\n'+$('b').value+'\n';
+const draw=()=>{$('pv').innerHTML='<h1>'+($('t').value||'Untitled').replace(/</g,'&lt;')+'</h1>'+marked.parse($('b').value)};
+['t','s','d','g','u','b'].forEach(i=>$(i).addEventListener('input',draw));draw();
+const ok=()=>{if(!$('t').value.trim()||!slug()){$('msg').textContent='Add a title first.';return false}return true};
+$('cp').onclick=async()=>{if(ok()){await navigator.clipboard.writeText(file());$('msg').textContent='Copied.'}};
+$('dl').onclick=()=>{if(!ok())return;const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([file()],{type:'text/markdown'}));a.download=slug()+'.md';a.click()};
+$('pub').onclick=async()=>{if(!ok())return;const c=file(),base='https://github.com/'+REPO+'/new/'+BR+'/posts?filename='+encodeURIComponent(slug()+'.md');
+ const url=base+'&value='+encodeURIComponent(c);
+ if(url.length<7000){open(url,'_blank')}else{await navigator.clipboard.writeText(c);open(base,'_blank');$('msg').textContent='Post is long, so it was copied. Paste it into the GitHub page, then commit.'}};
+</script></body></html>

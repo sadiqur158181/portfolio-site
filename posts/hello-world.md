@@ -1,3 +1,9 @@
+---
+title: What I will write about here
+date: 2026-10-03
+tags: meta
+summary: Oracle EBS, RAC, APEX/ORDS and OCI notes from production work.
+---
 This blog collects working notes from running Oracle environments in production.
 
 ## Topics
@@ -8,12 +14,6 @@ This blog collects working notes from running Oracle environments in production.
 - APEX and ORDS behind nginx
 - OCI networking: DRG, RPC, IAM
 
-## Writing a post
-
-Code blocks are highlighted:
-
 ```sql
 SELECT name, open_mode FROM v$database;
 ```
-
-Replace this post with your own.
