@@ -12,7 +12,7 @@ async function renderPosts(el){
 async function renderDocs(el){
   const docs=await getJSON('docs/docs.json');
   if(!docs||!docs.length){el.innerHTML='<div class="empty">No documents yet. Drop a PDF or DOCX in <code>docs/</code> and list it in <code>docs/docs.json</code>.</div>';return}
-  el.innerHTML=docs.map(d=>`<a class="item" href="docs/${encodeURI(d.file)}" download><small>${esc((d.file.split('.').pop()||'').toUpperCase())}${d.date?' · '+fmt(d.date):''}</small><h3>${esc(d.title)}</h3><p>${esc(d.desc||'')}</p></a>`).join('');
+  el.innerHTML=docs.map(d=>`<a class="item" href="${/\.pdf$/i.test(d.file)?'reader.html?f='+encodeURIComponent(d.file):'docs/'+encodeURI(d.file)}"><small>${esc((d.file.split('.').pop()||'').toUpperCase())}${d.date?' · '+fmt(d.date):''}</small><h3>${esc(d.title)}</h3><p>${esc(d.desc||'')}</p></a>`).join('');
 }
 async function renderPost(){
   const slug=new URLSearchParams(location.search).get('p');

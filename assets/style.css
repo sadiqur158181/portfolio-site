@@ -63,3 +63,6 @@ article.post td,article.post th{border:1px solid var(--line);padding:6px 10px}
 @media (max-width:760px){.hero{grid-template-columns:1fr;padding-top:48px}.composer{grid-template-columns:1fr}}
 
 .aside{display:flex;flex-direction:column;align-items:flex-start}.portrait{width:200px;height:auto;border-radius:14px;border:1px solid var(--line);display:block}
+.pages{margin-bottom:80px;user-select:none;-webkit-user-select:none}
+.pages canvas{display:block;max-width:100%;margin:0 auto 18px;border:1px solid var(--line);border-radius:6px;background:#fff;box-shadow:0 1px 6px rgba(13,27,42,.08)}
+@media print{.pages{display:none}}

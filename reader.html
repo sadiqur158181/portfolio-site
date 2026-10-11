@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><head><title>Reader | Sadiqur Rahman</title><meta name="robots" content="noindex"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;600&display=swap" rel="stylesheet"><link rel="stylesheet" href="assets/style.css"></head><body><header class="top"><div class="wrap"><a class="brand" href="index.html">Sadiqur Rahman</a><nav><a href="index.html#experience">Experience</a><a href="blog.html">Blog</a><a href="index.html#library">Library</a><a href="index.html#contact">Contact</a></nav></div></header>
+<main class="wrap"><div class="pagehead"><h1 id="rt">Document</h1><p><a href="index.html#library">Back to library</a></p></div><div id="pages" class="pages" aria-live="polite">Loading…</div></main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const f=new URLSearchParams(location.search).get('f')||'';
+const box=document.getElementById('pages');
+if(!/^[\w.\-]+\.pdf$/i.test(f)){box.textContent='Document not found.'}
+else{
+ fetch('docs/docs.json').then(r=>r.json()).then(d=>{const m=d.find(x=>x.file===f);if(m){document.getElementById('rt').textContent=m.title;document.title=m.title+' | Sadiqur Rahman'}}).catch(()=>{});
+ pdfjsLib.getDocument('docs/'+encodeURIComponent(f)).promise.then(async pdf=>{
+  box.textContent='';
+  const w=Math.min(box.clientWidth||900,1000),dpr=window.devicePixelRatio||1;
+  for(let i=1;i<=pdf.numPages;i++){
+   const p=await pdf.getPage(i),v0=p.getViewport({scale:1}),s=w/v0.width,v=p.getViewport({scale:s*dpr});
+   const c=document.createElement('canvas');c.width=v.width;c.height=v.height;c.style.width=w+'px';c.style.height=(v.height/dpr)+'px';
+   c.setAttribute('aria-label','Page '+i+' of '+pdf.numPages);box.appendChild(c);
+   await p.render({canvasContext:c.getContext('2d'),viewport:v}).promise;
+  }
+ }).catch(()=>{box.textContent='Could not load the document.'});
+}
+document.addEventListener('contextmenu',e=>{if(e.target.closest('#pages'))e.preventDefault()});
+</script></body></html>
